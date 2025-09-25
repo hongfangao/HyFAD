@@ -1,0 +1,38 @@
+
+#type: args
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 5.0e-4
+  itr_per_epoch: 1.0e+8
+  schedule_lr: "step"
+
+
+diffusion:
+  layers_t: 4
+  layers_f: 4
+  channels: 128 
+  nheads_time: 8
+  nheads_freq: 8
+  time_diffusion_embedding_dim: 128
+  freq_diffusion_embedding_dim: 128
+  beta_start: 0.0001
+  beta_end: 0.5
+  beta_start_f: 0.0001
+  beta_end_f: 0.25
+  lambda_mix: 0.75
+  aux_branch_weight: 0.0
+  num_steps: 50
+  schedule: "quad"
+  is_linear_time: False
+  is_linear_freq: False
+  trans: dft
+
+model:
+  is_unconditional: 0
+  timeemb: 128
+  featureemb: 16
+  target_strategy: "random"
+  missing_k: 0.9
+  

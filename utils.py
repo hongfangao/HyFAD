@@ -36,11 +36,9 @@ def train(
 
             def get_lr(self):
                 if self.last_epoch < self.warmup_epochs:
-                    # 线性 warmup
                     warmup_factor = float(self.last_epoch + 1) / float(self.warmup_epochs)
                     return [base_lr * warmup_factor for base_lr in self.base_lrs]
                 else:
-                    # 余弦退火
                     progress = (self.last_epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
                     cosine_factor = 0.5 * (1.0 + math.cos(math.pi * progress))
                     return [

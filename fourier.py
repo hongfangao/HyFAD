@@ -185,8 +185,8 @@ def idwt_haar(coeff: torch.Tensor) -> torch.Tensor:
 
 def dft_unitary(x: torch.Tensor) -> torch.Tensor:
     """
-    正交打包的 rFFT：把非冗余谱打平成长度 L 的实向量，并保证 ||x||_2 = ||y||_2
-    x: (B, C, L)  -> y: (B, C, L)
+    Orthogonal packed rFFT: flatten non-redundant spectrum into real vector of length L, ensuring ||x||_2 = ||y||_2
+    x: (B, C, L) -> y: (B, C, L)
     """
     assert x.dtype in (torch.float32, torch.float64)
     B, C, L = x.shape
@@ -195,14 +195,14 @@ def dft_unitary(x: torch.Tensor) -> torch.Tensor:
     im = X.imag                                # (B,C,Nr)
 
     Nr = re.size(2)
-    # 去掉 DC 的虚部；若 L 为偶数，再去掉 Nyquist 的虚部
+    # Remove the imaginary part of DC; if L is even, also remove the imaginary part of Nyquist
     if L % 2 == 0:
         im_trim = im[:, :, 1:Nr-1]             # (B,C,Nr-2)
     else:
         im_trim = im[:, :, 1:Nr]               # (B,C,Nr-1)
 
     sqrt2 = math.sqrt(2.0)
-    # 对非 DC/非 Nyquist 的实部乘 sqrt(2)
+    # Multiply real parts of non-DC/non-Nyquist by sqrt(2)
     scale_re = torch.ones_like(re)
     if L % 2 == 0:
         if Nr - 2 > 0:
@@ -221,13 +221,13 @@ def idft_unitary(y: torch.Tensor) -> torch.Tensor:
 
     assert y.dtype in (torch.float32, torch.float64)
     B, C, L = y.shape
-    Nr = L // 2 + 1                             # rFFT 非冗余长度
+    Nr = L // 2 + 1                             # rFFT non-redundant length
 
     re_scaled = y[:, :, :Nr]                    # (B,C,Nr)
     im_scaled = y[:, :, Nr:]                    # (B,C,L-Nr) == (Nr-1 或 Nr-2)
 
     sqrt2 = math.sqrt(2.0)
-    # 还原实部缩放
+    # Restore real part scaling
     scale_re = torch.ones_like(re_scaled)
     if L % 2 == 0:
         if Nr - 2 > 0:
@@ -236,7 +236,7 @@ def idft_unitary(y: torch.Tensor) -> torch.Tensor:
         scale_re[:, :, 1:Nr] = sqrt2
     re = re_scaled / scale_re
 
-    # 还原虚部并补上 DC / Nyquist 的 0
+    # Restore imaginary part and pad with zeros for DC / Nyquist
     zeros = torch.zeros(B, C, 1, device=y.device, dtype=y.dtype)
     if L % 2 == 0:
         im = torch.cat([zeros, im_scaled / sqrt2, zeros], dim=2)  # (B,C,Nr)

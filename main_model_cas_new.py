@@ -24,12 +24,15 @@ class CD2_base(nn.Module):
         trans = config["diffusion"]["trans"]
         assert trans in ["dft", "dct", "dwt"]
         if trans == "dft":
+            self.t2f = dft_unitary
             self.f2t = idft_unitary
             self.noise_scaling = set_noise_scaling_identity
         elif trans == "dct":
+            self.t2f = dct
             self.f2t = idct
             self.noise_scaling = set_noise_scaling_identity
         elif trans == "dwt":
+            self.t2f = dwt_haar
             self.f2t = idwt_haar
             self.noise_scaling = set_noise_scaling_identity
 
@@ -37,12 +40,17 @@ class CD2_base(nn.Module):
         if not self.is_unconditional:
             self.emb_total_dim += 1
 
-        self.embed_layer = nn.Embedding(
+        self.embed_layer_t = nn.Embedding(
+            num_embeddings=self.target_dim, embedding_dim=self.emb_feature_dim
+        )
+
+        self.embed_layer_f = nn.Embedding(
             num_embeddings=self.target_dim, embedding_dim=self.emb_feature_dim
         )
 
         config_diff = config["diffusion"]
-        config_diff["side_dim"] = self.emb_total_dim
+        config_diff["side_dim_time"] = self.emb_total_dim
+        config_diff["side_dim_freq"] = self.emb_total_dim + 2
 
         input_dim = 1 if self.is_unconditional else 2
         self.diffmodel = diff_CD2(config_diff, input_dim)
@@ -129,6 +137,25 @@ class CD2_base(nn.Module):
                 cond_mask[i] = cond_mask[i] * for_pattern_mask[i - 1]
         return cond_mask
 
+    def build_freq_weight(
+        self,
+        cond_mask: torch.Tensor,
+        cond_obs = None,
+        eps: float = 1e-6,
+        kappa: float = 0.5,
+        ):
+        m = cond_mask.float()
+        m_f = self.t2f(m)
+        uct = m_f.pow(2)
+        if cond_obs is None:
+            S = torch.ones_like(uct)
+        else:
+            Xc_f = self.t2f(cond_obs.float())
+            S = Xc_f.pow(2)
+        w = S / (S + kappa*uct + eps)
+        w = w.clamp(0.0, 1.0)
+        return w
+
     def get_test_pattern_mask(self, observed_mask, test_pattern_mask):
         return observed_mask * test_pattern_mask
 
@@ -137,7 +164,7 @@ class CD2_base(nn.Module):
         time_embed = self.time_embedding(observed_tp, self.emb_time_dim)
         time_embed = time_embed.unsqueeze(2).expand(-1, -1, K, -1)
 
-        feature_embed = self.embed_layer(torch.arange(self.target_dim, device=self.device))
+        feature_embed = self.embed_layer_t(torch.arange(self.target_dim, device=self.device))
         feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
 
         side_info = torch.cat([time_embed, feature_embed], dim=-1)
@@ -148,16 +175,36 @@ class CD2_base(nn.Module):
             side_info = torch.cat([side_info, side_mask], dim=1)
         return side_info
 
-    def calc_loss_valid(self, observed_data, cond_mask, observed_mask, side_info, is_train):
+    def get_side_info_freq(self, observed_tp, cond_mask):
+        B, K, L = cond_mask.shape
+        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)
+        time_embed = time_embed.unsqueeze(2).expand(-1, -1, K, -1)
+        feature_embed = self.embed_layer_f(torch.arange(self.target_dim, device=self.device))
+        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
+
+        side_info = torch.cat([time_embed, feature_embed], dim=-1)
+        side_info = side_info.permute(0, 3, 2, 1).contiguous()
+
+        if not self.is_unconditional:
+            side_info = torch.cat([side_info, cond_mask.unsqueeze(1)], dim=1)
+        
+        m_f = self.t2f(cond_mask.float())
+        p = cond_mask.float().mean(dim=-1, keepdim=True)
+        pL = p.expand(-1, -1, L)
+        side_freq = torch.cat([side_info, m_f.unsqueeze(1), pL.unsqueeze(1)], dim=1)
+
+        return side_freq
+
+    def calc_loss_valid(self, observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train):
         loss_sum = 0
         for t in range(self.num_steps):
             loss = self.calc_loss(
-                observed_data, cond_mask, observed_mask, side_info, is_train, set_t=t
+                observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train, set_t=t
             )
             loss_sum += loss.detach()
         return loss_sum / self.num_steps
 
-    def calc_loss(self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1):
+    def calc_loss(self, observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train, set_t=-1):
         B, K, L = observed_data.shape
         lam = self.lambda_mix
         sqrt_lam = lam ** 0.5
@@ -226,7 +273,7 @@ class CD2_base(nn.Module):
 
         # predict time noise
         inp_t = self.set_input_to_diffmodel(noisy_x, observed_data, cond_mask)
-        pred_t, _ = self.diffmodel(inp_t, side_info, t)
+        pred_t = self.diffmodel.forward_time(inp_t, side_info_t, t)
         loss_time = (((true_t - pred_t) * target_mask) ** 2).sum() / denom
 
         # compute effective frequency variance coefficient sigma_f for current step
@@ -260,9 +307,13 @@ class CD2_base(nn.Module):
         x_t_time = (noisy_x - c_t * pred_t.detach()) * inv_sqrt_alpha_t
 
         # predict frequency noise (standard normal in frequency branch mapped to time domain)
-        inp_f = self.set_input_to_diffmodel(x_t_time, observed_data, cond_mask)
-        _, pred_f = self.diffmodel(inp_f, side_info, t)
+        inp_f = self.set_input_to_diffmodel_f(x_t_time, observed_data, cond_mask)
+        # N_t = (1.0 - self.alpha_bar_torch_f[t]).to(observed_data.dtype)
+        N_t = sigma2.view(B).to(observed_data.dtype)
+        signal_proxy = (x_t_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
+        pred_f = self.diffmodel.forward_freq(inp_f, side_info_f, t, N_t=N_t, signal_proxy=signal_proxy)
 
+        # uncertainty-aware frequency domain scaling
         pred_f_time = sigma_f * self.f2t(G * pred_f)
         loss_freq = (((true_f - pred_f_time) * target_mask) ** 2).sum() / denom
 
@@ -282,9 +333,19 @@ class CD2_base(nn.Module):
             noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
             total_input = torch.cat([cond_obs, noisy_target], dim=1)
         return total_input
+    
+    def set_input_to_diffmodel_f(self, noisy_data, observed_data, cond_mask):
+        if self.is_unconditional: 
+            total_input = noisy_data.unsqueeze(1)
+        else:
+            cond_obs = (cond_mask * observed_data).unsqueeze(1)
+            noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
+            total_input = torch.cat([cond_obs, noisy_target], dim=1)
+        return total_input
+        
 
     @torch.no_grad()
-    def impute(self, observed_data, cond_mask, side_info, n_samples: int):
+    def impute(self, observed_data, cond_mask, side_info_t, side_info_f, n_samples: int):
         B, K, L = observed_data.shape
         device = self.device
         dtype = observed_data.dtype
@@ -311,6 +372,43 @@ class CD2_base(nn.Module):
 
         G = self.noise_scaling(L, device=device)
 
+        @torch.no_grad()
+        def build_sigma2_table():
+            T = self.num_steps
+            alpha_bar_t = self.alpha_bar_torch.to(device=device, dtype=dtype)
+            alpha_bar_f = self.alpha_bar_torch_f.to(device=device, dtype=dtype)
+            alpha_hat_f = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
+
+            lam = self.lambda_mix
+            sqrt_1m_lam2 = (1.0 - lam)  # (sqrt_1m_lam)^2
+
+            table = torch.zeros(T, device=device, dtype=dtype)
+
+            for k in range(T):
+                s_idx = torch.arange(0, k + 1, device=device, dtype=torch.long)
+
+                # chain_t = alpha_bar_t[k] / alpha_bar_t[s-1], with s=0 -> denom=1
+                alpha_bar_t_sminus1 = torch.ones_like(s_idx, dtype=dtype, device=device)
+                if k >= 1:
+                    pos = s_idx > 0
+                    alpha_bar_t_sminus1[pos] = alpha_bar_t[s_idx[pos] - 1]
+                chain_t = alpha_bar_t[k] / alpha_bar_t_sminus1
+
+                # chain_f = alpha_bar_f[k] / alpha_bar_f[s], with s=k -> denom=1
+                alpha_bar_f_s = torch.ones_like(s_idx, dtype=dtype, device=device)
+                if k >= 1:
+                    pos2 = s_idx < k
+                    alpha_bar_f_s[pos2] = alpha_bar_f[s_idx[pos2]]
+                chain_f = alpha_bar_f[k] / alpha_bar_f_s
+
+                sb_f = 1.0 - alpha_hat_f[s_idx]  # (k+1,)
+                w2 = sqrt_1m_lam2 * sb_f * chain_t * chain_f
+                table[k] = w2.sum()
+
+            return table  # (T,)
+
+        sigma2_table = build_sigma2_table()
+
         def init_prior(B, K, L):
             z_t = torch.randn(B, K, L, device=device, dtype=dtype)
             z_f = torch.randn(B, K, L, device=device, dtype=dtype)
@@ -327,20 +425,26 @@ class CD2_base(nn.Module):
 
                 # (1) time denoise
                 inp_t = self.set_input_to_diffmodel(x_t_cur, observed_data, cond_mask)
-                pred_t, _ = self.diffmodel(inp_t, side_info, t_batch)
+                pred_t = self.diffmodel.forward_time(inp_t, side_info_t, t_batch)
 
                 ct = c_t[tt].view(1, 1, 1)
                 inv_sqrt_at = inv_sqrt_alpha_t[tt].view(1, 1, 1)
                 x_time = (x_t_cur - ct * pred_t) * inv_sqrt_at
 
                 # (2) frequency denoise
-                inp_f = self.set_input_to_diffmodel(x_time, observed_data, cond_mask)
-                _, pred_f = self.diffmodel(inp_f, side_info, t_batch)
+                inp_f = self.set_input_to_diffmodel_f(x_time, observed_data, cond_mask)
+                N_t = sigma2_table[tt].expand(B)
+                signal_proxy = (x_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
+                pred_f = self.diffmodel.forward_freq(inp_f, side_info_f, t_batch, N_t=N_t, signal_proxy=signal_proxy)
+
+                # # uncertainty-aware frequency weighting
+                # w = self.build_freq_weight(cond_mask, cond_obs)
 
                 step_freq = sqrt_1m_lam * sqrt_beta_f[tt].view(1, 1, 1) * self.f2t(G * pred_f)
                 inv_sqrt_af = inv_sqrt_alpha_f[tt].view(1, 1, 1)
                 x_prev = (x_time - step_freq) * inv_sqrt_af
 
+                x_prev = cond_mask * observed_data + (1.0 - cond_mask) * x_prev
                 # (3) optional stochasticity can be added here if needed
 
                 x_t_cur = x_prev
@@ -366,9 +470,10 @@ class CD2_base(nn.Module):
         else:
             cond_mask = self.get_randmask(observed_mask)
 
-        side_info = self.get_side_info(observed_tp, cond_mask)
+        side_info_t = self.get_side_info(observed_tp, cond_mask)
+        side_info_f = self.get_side_info_freq(observed_tp, cond_mask)
         loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
-        return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
+        return loss_func(observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train)
 
     def evaluate(self, batch, n_samples):
         (
@@ -383,8 +488,9 @@ class CD2_base(nn.Module):
         with torch.no_grad():
             cond_mask = gt_mask
             target_mask = observed_mask - cond_mask
-            side_info = self.get_side_info(observed_tp, cond_mask)
-            samples = self.impute(observed_data, cond_mask, side_info, n_samples)
+            side_info_t = self.get_side_info(observed_tp, cond_mask)
+            side_info_f = self.get_side_info_freq(observed_tp, cond_mask)
+            samples = self.impute(observed_data, cond_mask, side_info_t, side_info_f, n_samples)
             for i in range(len(cut_length)):
                 target_mask[i, ..., 0:cut_length[i].item()] = 0
         return samples, observed_data, target_mask, observed_mask, observed_tp

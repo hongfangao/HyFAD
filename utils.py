@@ -202,7 +202,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     },
                     refresh=True,
                 )
-                if batch_no % 10 == 0:
+                if batch_no % 1 == 0:
                     epoch_info = f"\nrmse_total:{np.sqrt(mse_total / evalpoints_total)}\nmae_total:{mae_total / evalpoints_total}\nbatch_no:{batch_no}"
                     logging.info(epoch_info)
             with open(

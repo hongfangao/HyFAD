@@ -1,7 +1,7 @@
 import logging
 from utils import train, evaluate
 from dataset_physio import get_dataloader
-from main_model_cas_new import CD2_Physio
+from main_model_update import CD2_Physio
 import argparse
 import torch
 import datetime
@@ -22,7 +22,7 @@ logging.info("training with normalize_gate = false")
 
 parser = argparse.ArgumentParser(description="cd2")
 parser.add_argument("--config", type=str, default="base.yaml")
-parser.add_argument('--device', default='cuda:4', help='Device for Attack')
+parser.add_argument('--device', default='cuda:6', help='Device for Attack')
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--testmissingratio", type=float, default=0.9)
 parser.add_argument(

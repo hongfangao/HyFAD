@@ -1,16 +1,15 @@
-import numpy as np
 import torch
-import torch.nn as nn
-
+import torch.nn as nn 
 from fourier import dft_unitary, idft_unitary
 from fourier import dct, idct
 from fourier import dwt_haar, idwt_haar
-from utils import set_noise_scaling_identity
+from utils import set_noise_scaling, set_noise_scaling_identity
+import numpy as np
 from diff_models_adaptive import diff_CD2
 from utils import cosine_beta_scheduler, compute_alphas
-# ============================================================
-# CD2_base (patched calc_loss / impute to use correct signal_proxy & pass cond_mask)
-# ============================================================
+# =========================================================
+#                      CD2_base
+# =========================================================
 class CD2_base(nn.Module):
     def __init__(self, target_dim, config, device):
         super().__init__()
@@ -65,7 +64,7 @@ class CD2_base(nn.Module):
             beta = cosine_beta_scheduler(self.num_steps)
             beta_f = cosine_beta_scheduler(self.num_steps)
         else:
-            raise ValueError("Unknown time schedule")
+            raise ValueError("Unknown schedule")
 
         self.beta_torch = torch.tensor(beta, dtype=torch.float32, device=self.device)
         self.beta_f_torch = torch.tensor(beta_f, dtype=torch.float32, device=self.device)
@@ -76,6 +75,7 @@ class CD2_base(nn.Module):
             self.sqrt_alpha_bar_torch,
             self.sqrt_one_minus_alpha_bar_torch,
         ) = compute_alphas(self.beta_torch)
+
         (
             self.alpha_hat_torch_f,
             self.alpha_bar_torch_f,
@@ -89,9 +89,7 @@ class CD2_base(nn.Module):
     def time_embedding(self, pos, d_model=128):
         pe = torch.zeros(pos.shape[0], pos.shape[1], d_model, device=self.device)
         position = pos.unsqueeze(2)
-        div_term = 1 / torch.pow(
-            10000.0, torch.arange(0, d_model, 2, device=self.device) / d_model
-        )
+        div_term = 1 / torch.pow(10000.0, torch.arange(0, d_model, 2, device=self.device) / d_model)
         pe[:, :, 0::2] = torch.sin(position * div_term)
         pe[:, :, 1::2] = torch.cos(position * div_term)
         return pe
@@ -160,33 +158,27 @@ class CD2_base(nn.Module):
         side_freq = torch.cat([side_info, m_f.unsqueeze(1), pL.unsqueeze(1)], dim=1)
         return side_freq
 
+    def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
+        if self.is_unconditional:
+            return noisy_data.unsqueeze(1)
+        cond_obs = (cond_mask * observed_data).unsqueeze(1)
+        noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
+        return torch.cat([cond_obs, noisy_target], dim=1)
+
+    def set_input_to_diffmodel_f(self, noisy_data, observed_data, cond_mask):
+        # 同上（保留）
+        if self.is_unconditional:
+            return noisy_data.unsqueeze(1)
+        cond_obs = (cond_mask * observed_data).unsqueeze(1)
+        noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
+        return torch.cat([cond_obs, noisy_target], dim=1)
+
     def calc_loss_valid(self, observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train):
         loss_sum = 0
         for t in range(self.num_steps):
-            loss = self.calc_loss(
-                observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train, set_t=t
-            )
+            loss = self.calc_loss(observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train, set_t=t)
             loss_sum += loss.detach()
         return loss_sum / self.num_steps
-
-    def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
-        if self.is_unconditional:
-            total_input = noisy_data.unsqueeze(1)
-        else:
-            cond_obs = (cond_mask * observed_data).unsqueeze(1)
-            noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
-            total_input = torch.cat([cond_obs, noisy_target], dim=1)
-        return total_input
-
-    def set_input_to_diffmodel_f(self, noisy_data, observed_data, cond_mask):
-        # 这里仍然沿用你的输入形式；是否要把 cond_mask 显式拼进去可以后续再做 ablation
-        if self.is_unconditional:
-            total_input = noisy_data.unsqueeze(1)
-        else:
-            cond_obs = (cond_mask * observed_data).unsqueeze(1)
-            noisy_target = ((1 - cond_mask) * noisy_data).unsqueeze(1)
-            total_input = torch.cat([cond_obs, noisy_target], dim=1)
-        return total_input
 
     def calc_loss(self, observed_data, cond_mask, observed_mask, side_info_t, side_info_f, is_train, set_t=-1):
         B, K, L = observed_data.shape
@@ -210,7 +202,7 @@ class CD2_base(nn.Module):
         true_t = torch.zeros_like(observed_data)
         true_f = torch.zeros_like(observed_data)
 
-        # forward noise synthesis (your original)
+        # -------- forward noise synthesis --------
         for i in range(B):
             k = int(t[i].item())
             x0 = observed_data[i]
@@ -253,59 +245,53 @@ class CD2_base(nn.Module):
         num_eval = target_mask.sum()
         denom = (num_eval if num_eval > 0 else 1.0)
 
-        # predict time noise
+        # -------- time noise prediction --------
         inp_t = self.set_input_to_diffmodel(noisy_x, observed_data, cond_mask)
         pred_t = self.diffmodel.forward_time(inp_t, side_info_t, t)
         loss_time = (((true_t - pred_t) * target_mask) ** 2).sum() / denom
 
-        # compute sigma2 for frequency uncertainty proxy (your original)
+        # -------- compute sigma2 (same as你之前) --------
         sigma2 = torch.zeros(B, 1, 1, device=self.device, dtype=observed_data.dtype)
         for i in range(B):
             k = int(t[i].item())
-            if k >= 0:
-                s_idx = torch.arange(0, k + 1, device=self.device, dtype=torch.long)
+            s_idx = torch.arange(0, k + 1, device=self.device, dtype=torch.long)
 
-                alpha_bar_t_sminus1 = torch.ones_like(s_idx, dtype=alpha_bar_t.dtype, device=self.device)
-                if k >= 1:
-                    pos = s_idx > 0
-                    alpha_bar_t_sminus1[pos] = alpha_bar_t[s_idx[pos] - 1]
-                chain_t = alpha_bar_t[k] / alpha_bar_t_sminus1
+            alpha_bar_t_sminus1 = torch.ones_like(s_idx, dtype=alpha_bar_t.dtype, device=self.device)
+            if k >= 1:
+                pos = s_idx > 0
+                alpha_bar_t_sminus1[pos] = alpha_bar_t[s_idx[pos] - 1]
+            chain_t = alpha_bar_t[k] / alpha_bar_t_sminus1
 
-                alpha_bar_f_s = torch.ones_like(s_idx, dtype=alpha_bar_f.dtype, device=self.device)
-                if k >= 1:
-                    pos2 = s_idx < k
-                    alpha_bar_f_s[pos2] = alpha_bar_f[s_idx[pos2]]
-                chain_f = alpha_bar_f[k] / alpha_bar_f_s
+            alpha_bar_f_s = torch.ones_like(s_idx, dtype=alpha_bar_f.dtype, device=self.device)
+            if k >= 1:
+                pos2 = s_idx < k
+                alpha_bar_f_s[pos2] = alpha_bar_f[s_idx[pos2]]
+            chain_f = alpha_bar_f[k] / alpha_bar_f_s
 
-                sb_f = 1.0 - alpha_hat_f[s_idx]
-                w2 = ((sqrt_1m_lam ** 2) * sb_f * chain_t * chain_f)
-                sigma2[i, 0, 0] = w2.sum()
+            sb_f = 1.0 - alpha_hat_f[s_idx]
+            w2 = ((sqrt_1m_lam ** 2) * sb_f * chain_t * chain_f)
+            sigma2[i, 0, 0] = w2.sum()
 
         sigma_f = torch.sqrt(sigma2)
 
-        # time-step update used to produce x_time
+        # -------- time-step update produce x_time --------
         c_t = (self.beta_torch[t] / torch.sqrt((1.0 - self.alpha_bar_torch[t]))).view(B, 1, 1)
         inv_sqrt_alpha_t = (1.0 / torch.sqrt(self.alpha_hat_torch[t])).view(B, 1, 1)
         x_t_time = (noisy_x - c_t * pred_t.detach()) * inv_sqrt_alpha_t
 
-        # predict frequency noise
+        # -------- freq noise prediction --------
         inp_f = self.set_input_to_diffmodel_f(x_t_time, observed_data, cond_mask)
         N_t = sigma2.view(B).to(observed_data.dtype)
 
-        # --------------------------
-        # [MOD-3] FIX signal_proxy
-        # observed positions use observed_data, missing positions use x_t_time
-        # --------------------------
+        # ===== [MOD-4] signal_proxy（你指定的插补一致形式）=====
+        # 观测位置用 observed_data，缺失位置用当前 x_t_time
         signal_proxy = (x_t_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
 
-        # --------------------------
-        # [MOD-4] pass cond_mask into forward_freq -> embedding
-        # --------------------------
         pred_f = self.diffmodel.forward_freq(
             inp_f, side_info_f, t,
             N_t=N_t,
             signal_proxy=signal_proxy,
-            cond_mask=cond_mask,
+            cond_mask=cond_mask,   # [MOD] 传给 embedding
         )
 
         pred_f_time = sigma_f * self.f2t(G * pred_f)
@@ -331,10 +317,8 @@ class CD2_base(nn.Module):
         beta_f = (1.0 - self.alpha_hat_torch_f).to(device=device, dtype=dtype)
         alpha_hat_f = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
 
-        sqrt_alpha_t = torch.sqrt(alpha_hat_t)
-        inv_sqrt_alpha_t = 1.0 / sqrt_alpha_t
-        sqrt_alpha_f = torch.sqrt(alpha_hat_f)
-        inv_sqrt_alpha_f = 1.0 / sqrt_alpha_f
+        inv_sqrt_alpha_t = 1.0 / torch.sqrt(alpha_hat_t)
+        inv_sqrt_alpha_f = 1.0 / torch.sqrt(alpha_hat_f)
 
         sqrt_one_minus_abart = torch.sqrt(1.0 - alpha_bar_t)
         c_t = beta_t / sqrt_one_minus_abart
@@ -342,14 +326,15 @@ class CD2_base(nn.Module):
 
         lam = self.lambda_mix
         sqrt_1m_lam = (1.0 - lam) ** 0.5
+
         G = self.noise_scaling(L, device=device)
 
         @torch.no_grad()
         def build_sigma2_table():
             T = self.num_steps
-            alpha_bar_t_ = self.alpha_bar_torch.to(device=device, dtype=dtype)
-            alpha_bar_f_ = self.alpha_bar_torch_f.to(device=device, dtype=dtype)
-            alpha_hat_f_ = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
+            alpha_bar_t = self.alpha_bar_torch.to(device=device, dtype=dtype)
+            alpha_bar_f = self.alpha_bar_torch_f.to(device=device, dtype=dtype)
+            alpha_hat_f = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
 
             sqrt_1m_lam2 = (1.0 - lam)
             table = torch.zeros(T, device=device, dtype=dtype)
@@ -360,16 +345,16 @@ class CD2_base(nn.Module):
                 alpha_bar_t_sminus1 = torch.ones_like(s_idx, dtype=dtype, device=device)
                 if k >= 1:
                     pos = s_idx > 0
-                    alpha_bar_t_sminus1[pos] = alpha_bar_t_[s_idx[pos] - 1]
-                chain_t = alpha_bar_t_[k] / alpha_bar_t_sminus1
+                    alpha_bar_t_sminus1[pos] = alpha_bar_t[s_idx[pos] - 1]
+                chain_t = alpha_bar_t[k] / alpha_bar_t_sminus1
 
                 alpha_bar_f_s = torch.ones_like(s_idx, dtype=dtype, device=device)
                 if k >= 1:
                     pos2 = s_idx < k
-                    alpha_bar_f_s[pos2] = alpha_bar_f_[s_idx[pos2]]
-                chain_f = alpha_bar_f_[k] / alpha_bar_f_s
+                    alpha_bar_f_s[pos2] = alpha_bar_f[s_idx[pos2]]
+                chain_f = alpha_bar_f[k] / alpha_bar_f_s
 
-                sb_f = 1.0 - alpha_hat_f_[s_idx]
+                sb_f = 1.0 - alpha_hat_f[s_idx]
                 w2 = sqrt_1m_lam2 * sb_f * chain_t * chain_f
                 table[k] = w2.sum()
 
@@ -383,8 +368,8 @@ class CD2_base(nn.Module):
             return (lam ** 0.5) * z_t + (sqrt_1m_lam) * self.f2t(G * z_f)
 
         imputed = torch.zeros(B, n_samples, K, L, device=device, dtype=dtype)
-
         T = self.num_steps
+
         for i in range(n_samples):
             x_t_cur = init_prior(B, K, L)
 
@@ -403,16 +388,14 @@ class CD2_base(nn.Module):
                 inp_f = self.set_input_to_diffmodel_f(x_time, observed_data, cond_mask)
                 N_t = sigma2_table[tt].expand(B)
 
-                # --------------------------
-                # [MOD-3] FIX signal_proxy (same as training)
-                # --------------------------
+                # ===== [MOD-5] impute 里的 signal_proxy 同样按插补一致形式 =====
                 signal_proxy = (x_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
 
                 pred_f = self.diffmodel.forward_freq(
                     inp_f, side_info_f, t_batch,
                     N_t=N_t,
                     signal_proxy=signal_proxy,
-                    cond_mask=cond_mask,  # [MOD-4]
+                    cond_mask=cond_mask,   # [MOD]
                 )
 
                 step_freq = sqrt_1m_lam * sqrt_beta_f[tt].view(1, 1, 1) * self.f2t(G * pred_f)
@@ -426,6 +409,94 @@ class CD2_base(nn.Module):
 
         return imputed
 
+    @torch.no_grad()
+    def impute_time(self, observed_data, cond_mask, side_info_t, n_samples: int):
+        B, K, L = observed_data.shape
+        device = self.device
+        dtype = observed_data.dtype
+
+        beta_t = self.beta_torch.to(device=device, dtype=dtype)
+        alpha_hat_t = self.alpha_hat_torch.to(device=device, dtype=dtype)
+        alpha_bar_t = self.alpha_bar_torch.to(device=device, dtype=dtype)
+
+        beta_f = (1.0 - self.alpha_hat_torch_f).to(device=device, dtype=dtype)
+        alpha_hat_f = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
+
+        inv_sqrt_alpha_t = 1.0 / torch.sqrt(alpha_hat_t)
+        inv_sqrt_alpha_f = 1.0 / torch.sqrt(alpha_hat_f)
+
+        sqrt_one_minus_abart = torch.sqrt(1.0 - alpha_bar_t)
+        c_t = beta_t / sqrt_one_minus_abart
+        sqrt_beta_f = torch.sqrt(beta_f)
+
+        lam = self.lambda_mix
+        sqrt_1m_lam = (1.0 - lam) ** 0.5
+
+        G = self.noise_scaling(L, device=device)
+
+        @torch.no_grad()
+        def build_sigma2_table():
+            T = self.num_steps
+            alpha_bar_t = self.alpha_bar_torch.to(device=device, dtype=dtype)
+            alpha_bar_f = self.alpha_bar_torch_f.to(device=device, dtype=dtype)
+            alpha_hat_f = self.alpha_hat_torch_f.to(device=device, dtype=dtype)
+
+            sqrt_1m_lam2 = (1.0 - lam)
+            table = torch.zeros(T, device=device, dtype=dtype)
+
+            for k in range(T):
+                s_idx = torch.arange(0, k + 1, device=device, dtype=torch.long)
+
+                alpha_bar_t_sminus1 = torch.ones_like(s_idx, dtype=dtype, device=device)
+                if k >= 1:
+                    pos = s_idx > 0
+                    alpha_bar_t_sminus1[pos] = alpha_bar_t[s_idx[pos] - 1]
+                chain_t = alpha_bar_t[k] / alpha_bar_t_sminus1
+
+                alpha_bar_f_s = torch.ones_like(s_idx, dtype=dtype, device=device)
+                if k >= 1:
+                    pos2 = s_idx < k
+                    alpha_bar_f_s[pos2] = alpha_bar_f[s_idx[pos2]]
+                chain_f = alpha_bar_f[k] / alpha_bar_f_s
+
+                sb_f = 1.0 - alpha_hat_f[s_idx]
+                w2 = sqrt_1m_lam2 * sb_f * chain_t * chain_f
+                table[k] = w2.sum()
+
+            return table
+
+        sigma2_table = build_sigma2_table()
+
+        def init_prior(B, K, L):
+            z_t = torch.randn(B, K, L, device=device, dtype=dtype)
+            z_f = torch.randn(B, K, L, device=device, dtype=dtype)
+            return (lam ** 0.5) * z_t + (sqrt_1m_lam) * self.f2t(G * z_f)
+
+        imputed = torch.zeros(B, n_samples, K, L, device=device, dtype=dtype)
+        T = self.num_steps
+
+        for i in range(n_samples):
+            x_t_cur = init_prior(B, K, L)
+
+            for tt in reversed(range(T)):
+                t_batch = torch.full((B,), tt, device=device, dtype=torch.long)
+
+                # (1) time denoise
+                inp_t = self.set_input_to_diffmodel(x_t_cur, observed_data, cond_mask)
+                pred_t = self.diffmodel.forward_time(inp_t, side_info_t, t_batch)
+
+                ct = c_t[tt].view(1, 1, 1)
+                inv_sqrt_at = inv_sqrt_alpha_t[tt].view(1, 1, 1)
+                x_prev = (x_t_cur - ct * pred_t) * inv_sqrt_at
+
+                x_prev = cond_mask * observed_data + (1.0 - cond_mask) * x_prev
+                x_t_cur = x_prev
+
+            imputed[:, i] = x_t_cur
+
+        return imputed
+    
+    
     def forward(self, batch, is_train=1):
         (
             observed_data,
@@ -433,7 +504,7 @@ class CD2_base(nn.Module):
             observed_tp,
             gt_mask,
             for_pattern_mask,
-            cut_length,
+            _,
         ) = self.process_data(batch)
 
         if is_train == 0:
@@ -467,13 +538,12 @@ class CD2_base(nn.Module):
             samples = self.impute(observed_data, cond_mask, side_info_t, side_info_f, n_samples)
             for i in range(len(cut_length)):
                 target_mask[i, ..., 0:cut_length[i].item()] = 0
-
         return samples, observed_data, target_mask, observed_mask, observed_tp
 
 
-# =======================
-# Dataset Wrappers
-# =======================
+# =========================================================
+#                    Dataset Wrappers
+# =========================================================
 class CD2_PM25(CD2_base):
     def __init__(self, config, device, target_dim=36):
         super(CD2_PM25, self).__init__(target_dim, config, device)
@@ -491,7 +561,7 @@ class CD2_PM25(CD2_base):
         gt_mask = gt_mask.permute(0, 2, 1)
         for_pattern_mask = for_pattern_mask.permute(0, 2, 1)
 
-        return observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length
+        return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)
 
 
 class CD2_Physio(CD2_base):
@@ -510,5 +580,4 @@ class CD2_Physio(CD2_base):
 
         cut_length = torch.zeros(len(observed_data), device=self.device).long()
         for_pattern_mask = observed_mask
-
-        return observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length
+        return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)

@@ -1,7 +1,7 @@
 import logging
 from utils import train, evaluate
 from dataset_pm25 import get_dataloader
-from main_model_cas_new import CD2_PM25
+from main_model_update import CD2_PM25
 import argparse
 import torch
 import datetime
@@ -20,7 +20,7 @@ logging.info("training with 2 betas")
 
 parser = argparse.ArgumentParser(description="cd2")
 parser.add_argument("--config", type=str, default="base.yaml")
-parser.add_argument('--device', default='cuda:1', help='Device for Attack')
+parser.add_argument('--device', default='cuda:7', help='Device for Attack')
 parser.add_argument("--modelfolder", type=str, default="")
 parser.add_argument(
     "--targetstrategy", type=str, default="mix", choices=["mix", "random", "historical"]

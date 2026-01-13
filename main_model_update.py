@@ -385,11 +385,11 @@ class CD2_base(nn.Module):
                 inv_sqrt_at = inv_sqrt_alpha_t[tt].view(1, 1, 1)
                 x_time = (x_t_cur - ct * pred_t) * inv_sqrt_at
 
-                if tt > 0:
-                    noise_t = torch.randn_like(x_time)
-                    x_time = x_time + (lam ** 0.5) * sqrt_beta_t[tt] * noise_t
-                else:
-                    x_time = x_time 
+                # if tt > 0:
+                #     noise_t = torch.randn_like(x_time)
+                #     x_time = x_time + (lam ** 0.5) * sqrt_beta_t[tt] * noise_t
+                # else:
+                #     x_time = x_time 
                 # (2) freq denoise
                 inp_f = self.set_input_to_diffmodel_f(x_time, observed_data, cond_mask)
                 N_t = sigma2_table[tt].expand(B)
@@ -408,11 +408,11 @@ class CD2_base(nn.Module):
                 inv_sqrt_af = inv_sqrt_alpha_f[tt].view(1, 1, 1)
                 x_prev = (x_time - step_freq) * inv_sqrt_af
 
-                if tt > 0:
-                    noise_f = torch.randn_like(x_prev)
-                    x_prev = x_prev + sqrt_1m_lam * sqrt_beta_f[tt] * self.f2t(G*noise_f)
-                else:
-                    x_prev = x_prev
+                # if tt > 0:
+                #     noise_f = torch.randn_like(x_prev)
+                #     x_prev = x_prev + sqrt_1m_lam * sqrt_beta_f[tt] * self.f2t(G*noise_f)
+                # else:
+                #     x_prev = x_prev
                 x_prev = cond_mask * observed_data + (1.0 - cond_mask) * x_prev
                 x_t_cur = x_prev
 

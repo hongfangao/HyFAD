@@ -119,7 +119,7 @@ def idct(x: torch.Tensor) -> torch.Tensor:
     '''
     assert x.ndim >= 1
     L = x.size(-1)
-    M = _dct_ortho_matrix(L, device=x.device)
+    M = _dct_ortho_matrix(L, device=x.device, dtype=x.dtype)
     return torch.matmul(x, M.transpose(0, 1))
 
 

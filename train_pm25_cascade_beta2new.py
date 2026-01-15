@@ -20,7 +20,7 @@ logging.info("training with 2 betas")
 
 parser = argparse.ArgumentParser(description="cd2")
 parser.add_argument("--config", type=str, default="base.yaml")
-parser.add_argument('--device', default='cuda:7', help='Device for Attack')
+parser.add_argument('--device', default='cuda:5', help='Device for Attack')
 parser.add_argument("--modelfolder", type=str, default="")
 parser.add_argument(
     "--targetstrategy", type=str, default="mix", choices=["mix", "random", "historical"]
@@ -28,7 +28,7 @@ parser.add_argument(
 parser.add_argument(
     "--validationindex", type=int, default=0, help="index of month used for validation (value:[0-7])"
 )
-parser.add_argument("--nsample", type=int, default=100)
+parser.add_argument("--nsample", type=int, default=1)
 parser.add_argument("--unconditional", action="store_true")
 
 args = parser.parse_args()
@@ -68,7 +68,7 @@ if args.modelfolder == "":
     )
 else:
     model.load_state_dict(torch.load(
-        "./save/" + args.modelfolder + "/model.pth"))
+        "./save/" + args.modelfolder + "/model_399.pth"))
 
 evaluate(
     model,

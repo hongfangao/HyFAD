@@ -18,13 +18,13 @@ logging.basicConfig(
     filemode='w',
 )
 
-logging.info("training with normalize_gate = false")
+logging.info("training with lambda = 0.5")
 
 parser = argparse.ArgumentParser(description="cd2")
 parser.add_argument("--config", type=str, default="base.yaml")
-parser.add_argument('--device', default='cuda:4', help='Device for Attack')
+parser.add_argument('--device', default='cuda:1', help='Device for Attack')
 parser.add_argument("--seed", type=int, default=1)
-parser.add_argument("--testmissingratio", type=float, default=0.5)
+parser.add_argument("--testmissingratio", type=float, default=0.9)
 parser.add_argument(
     "--nfold", type=int, default=0, help="for 5fold test (valid value:[0-4])"
 )

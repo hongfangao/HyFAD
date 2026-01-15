@@ -7,9 +7,8 @@ from utils import set_noise_scaling, set_noise_scaling_identity
 import numpy as np
 from diff_models_adaptive import diff_CD2
 from utils import cosine_beta_scheduler, compute_alphas
-# =========================================================
-#                      CD2_base
-# =========================================================
+
+
 class CD2_base(nn.Module):
     def __init__(self, target_dim, config, device):
         super().__init__()
@@ -166,7 +165,6 @@ class CD2_base(nn.Module):
         return torch.cat([cond_obs, noisy_target], dim=1)
 
     def set_input_to_diffmodel_f(self, noisy_data, observed_data, cond_mask):
-        # 同上（保留）
         if self.is_unconditional:
             return noisy_data.unsqueeze(1)
         cond_obs = (cond_mask * observed_data).unsqueeze(1)
@@ -202,7 +200,6 @@ class CD2_base(nn.Module):
         true_t = torch.zeros_like(observed_data)
         true_f = torch.zeros_like(observed_data)
 
-        # -------- forward noise synthesis --------
         for i in range(B):
             k = int(t[i].item())
             x0 = observed_data[i]
@@ -250,7 +247,6 @@ class CD2_base(nn.Module):
         pred_t = self.diffmodel.forward_time(inp_t, side_info_t, t)
         loss_time = (((true_t - pred_t) * target_mask) ** 2).sum() / denom
 
-        # -------- compute sigma2 (same as你之前) --------
         sigma2 = torch.zeros(B, 1, 1, device=self.device, dtype=observed_data.dtype)
         for i in range(B):
             k = int(t[i].item())
@@ -283,15 +279,13 @@ class CD2_base(nn.Module):
         inp_f = self.set_input_to_diffmodel_f(x_t_time, observed_data, cond_mask)
         N_t = sigma2.view(B).to(observed_data.dtype)
 
-        # ===== [MOD-4] signal_proxy（你指定的插补一致形式）=====
-        # 观测位置用 observed_data，缺失位置用当前 x_t_time
         signal_proxy = (x_t_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
 
         pred_f = self.diffmodel.forward_freq(
             inp_f, side_info_f, t,
             N_t=N_t,
             signal_proxy=signal_proxy,
-            cond_mask=cond_mask,   # [MOD] 传给 embedding
+            cond_mask=cond_mask,  
         )
 
         pred_f_time = sigma_f * self.f2t(G * pred_f)
@@ -394,14 +388,13 @@ class CD2_base(nn.Module):
                 inp_f = self.set_input_to_diffmodel_f(x_time, observed_data, cond_mask)
                 N_t = sigma2_table[tt].expand(B)
 
-                # ===== [MOD-5] impute 里的 signal_proxy 同样按插补一致形式 =====
                 signal_proxy = (x_time * (1.0 - cond_mask) + observed_data * cond_mask).detach()
 
                 pred_f = self.diffmodel.forward_freq(
                     inp_f, side_info_f, t_batch,
                     N_t=N_t,
                     signal_proxy=signal_proxy,
-                    cond_mask=cond_mask,   # [MOD]
+                    cond_mask=cond_mask,  
                 )
 
                 step_freq = sqrt_1m_lam * sqrt_beta_f[tt].view(1, 1, 1) * self.f2t(G * pred_f)
@@ -552,9 +545,6 @@ class CD2_base(nn.Module):
         return samples, observed_data, target_mask, observed_mask, observed_tp
 
 
-# =========================================================
-#                    Dataset Wrappers
-# =========================================================
 class CD2_PM25(CD2_base):
     def __init__(self, config, device, target_dim=36):
         super(CD2_PM25, self).__init__(target_dim, config, device)

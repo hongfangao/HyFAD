@@ -1,16 +1,3 @@
-# ============================================================
-# Full code (single file)
-# - CD2_base + Dataset wrappers
-# - diff_CD2 + ResidualBlock
-# - DiffusionEmbedding + FreqThresholdSelectiveDiffusionEmbedding (patched)
-#
-# Marked modifications:
-#   ### [MOD-1] missing-aware reliability weight in embedding (uses cond_mask)
-#   ### [MOD-2] stage-frequency schedule weight in embedding (uses diffusion_step)
-#   ### [MOD-3] fix signal_proxy definition in calc_loss / impute
-#   ### [MOD-4] pass cond_mask into forward_freq -> embedding
-# ============================================================
-
 import math
 import numpy as np
 import torch
@@ -26,10 +13,6 @@ from utils import cosine_beta_scheduler
 from utils import set_noise_scaling_identity
 from utils import compute_alphas
 
-
-# ==========================
-# Transformer backbones
-# ==========================
 def get_torch_trans(heads=8, layers=1, channels=64):
     encoder_layer = nn.TransformerEncoderLayer(
         d_model=channels, nhead=heads, dim_feedforward=64, activation="gelu"
@@ -53,10 +36,6 @@ def Conv1d_with_init(in_channels, out_channels, kernel_size):
     nn.init.kaiming_normal_(layer.weight)
     return layer
 
-
-# ==========================
-# Standard diffusion embedding
-# ==========================
 class DiffusionEmbedding(nn.Module):
     def __init__(self, num_steps, embedding_dim=128, projection_dim=None):
         super().__init__()
@@ -86,14 +65,7 @@ class DiffusionEmbedding(nn.Module):
         return table
 
 
-# ============================================================
-# Frequency embedding (patched)
-# ============================================================
 class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
-    """
-    gate(ω,t) = sigmoid((logP - logT)/tau)  *  reliability(mask,ω)  *  schedule(t,ω)
-    """
-
     def __init__(
         self,
         num_steps: int = 128,
@@ -101,7 +73,6 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         projection_dim: int = None,
         max_freq: float = 100.0,
         t2f: str = "dft",
-        # threshold part
         gamma_thr: float = 1.0,
         tau: float = 0.7,
         eps: float = 1e-6,
@@ -112,16 +83,14 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         threshold_calib: str = "global_ema",
         ema_decay: float = 0.99,
         power_reduce: str = "mean",
-        # [MOD-1] missing-aware reliability
         kappa_miss: float = 0.5,
         use_missing_reliability: bool = True,
-        # [MOD-2] stage-frequency schedule
         use_stage_schedule: bool = True,
         schedule_sharpness: float = 2.0,
         cutoff_min: float = 1.0,
         cutoff_max: float = 100.0,
         cutoff_power: float = 1.0,
-        schedule_mode: str = "low2high",  # reverse sampling: tt high -> low-freq; tt low -> high-freq
+        schedule_mode: str = "low2high", 
     ):
         super().__init__()
         assert d_model % 2 == 0, "d_model must be even"
@@ -143,11 +112,9 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         self.ema_decay = ema_decay
         self.power_reduce = power_reduce
 
-        # [MOD-1]
         self.kappa_miss = kappa_miss
         self.use_missing_reliability = use_missing_reliability
 
-        # [MOD-2]
         self.use_stage_schedule = use_stage_schedule
         self.schedule_sharpness = float(schedule_sharpness)
         self.cutoff_min = float(cutoff_min)
@@ -195,6 +162,17 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
                 if Nr - 1 > 0:
                     P[:, :, 1:Nr] = 0.5 * (re[:, :, 1:Nr].pow(2) + im[:, :, :Nr-1].pow(2))
             return P
+        elif self.t2f == dwt_haar:
+            B, K, L = z.shape
+            assert L % 2 == 0, "Haar DWT output length should be even"
+            L2 = L // 2
+            cA = z[:, :, :L2]
+            cD = z[:, :, L2:]
+
+            P_low  = (cA ** 2).mean(dim=-1, keepdim=True)  # (B,K,1)
+            P_high = (cD ** 2).mean(dim=-1, keepdim=True)  # (B,K,1)
+            P = torch.cat([P_low, P_high], dim=-1)         # (B,K,2)
+            return P
         else:
             return z.pow(2)
 
@@ -225,24 +203,25 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         y_ = F.interpolate(x_, size=out_len, mode="linear", align_corners=False)
         return y_.squeeze(1)
 
-    # --------------------------
-    # [MOD-1] missing-aware reliability weight
-    # --------------------------
-    def _missing_reliability(self, cond_mask: torch.Tensor) -> torch.Tensor:
+    def _missing_reliability(
+        self, 
+        cond_mask: torch.Tensor,
+        signal_proxy: torch.Tensor
+        ) -> torch.Tensor:
         """
         cond_mask: (B,K,L) in {0,1}
         reliability R(ω) = 1 / (1 + kappa * P_missing(ω))  (bin-wise, reduced over K)
         """
+        z_s = self.t2f(signal_proxy)
+        Ps = self._power_spectrum(z_s)
+        Ps_bin = self._reduce_channels(Ps)
         missing = (1.0 - cond_mask.float()).to(torch.float32)     # missing indicator
         z_m = self.t2f(missing)                                   # (B,K,L*)
         Pm = self._power_spectrum(z_m)                             # (B,K,Nbin)
-        Pm_bin = self._reduce_channels(Pm)                         # (B,Nbin)
-        R = 1.0 / (1.0 + self.kappa_miss * Pm_bin + self.eps)
+        Pm_bin = self._reduce_channels(Pm)
+        R = Ps_bin / (Ps_bin + self.kappa_miss * Pm_bin + self.eps)
         return R.clamp(0.0, 1.0)                                   # (B,Nbin)
 
-    # --------------------------
-    # [MOD-2] stage-frequency schedule
-    # --------------------------
     def _schedule_weight(self, diffusion_step: torch.LongTensor, Nbin: int, device, dtype):
         """
         Return w_sched: (B, Nbin), encourages different ω bands at different t.
@@ -255,30 +234,24 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         if not self.use_stage_schedule:
             return torch.ones(diffusion_step.size(0), Nbin, device=device, dtype=dtype)
 
-        # normalize reverse time: tt in [0..T-1]
         tt = diffusion_step.to(dtype=torch.float32)
         T = float(self.num_steps - 1)
         u = tt / max(T, 1.0)  # u in [0,1]
 
         if self.schedule_mode == "low2high":
-            # u=1 (early) -> c small; u=0 (late) -> c large
             s = (1.0 - u).clamp(0.0, 1.0)  # late larger
         elif self.schedule_mode == "high2low":
             s = u.clamp(0.0, 1.0)
         else:
             raise ValueError(f"unknown schedule_mode={self.schedule_mode}")
 
-        # curvature
         s = s.pow(self.cutoff_power)
 
         c = self.cutoff_min + (self.cutoff_max - self.cutoff_min) * s  # (B,)
         c = c.to(device=device, dtype=dtype).unsqueeze(-1)             # (B,1)
 
-        # ω grid in bins: use linspace [0,1] then map to max_freq-like scale
-        # NOTE: this is for gating only; exact physical ω not critical as long as monotonic.
         w_grid = torch.linspace(0.0, 1.0, Nbin, device=device, dtype=dtype).unsqueeze(0)  # (1,Nbin)
 
-        # make w_grid comparable with c: rescale to [0, cutoff_max]
         w_grid = w_grid * self.cutoff_max
 
         p = self.schedule_sharpness
@@ -290,7 +263,7 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         diffusion_step: torch.LongTensor,
         N_t: torch.Tensor,
         signal_proxy: torch.Tensor,
-        cond_mask: torch.Tensor,  # [MOD-4] added
+        cond_mask: torch.Tensor, 
     ) -> torch.Tensor:
         """
         diffusion_step: (B,)
@@ -301,39 +274,33 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         B = diffusion_step.shape[0]
         device = diffusion_step.device
 
-        # power spectrum of proxy
         z = self.t2f(signal_proxy.to(torch.float32))
         P = self._power_spectrum(z)              # (B,K,Nbin)
         P_bin = self._reduce_channels(P)         # (B,Nbin)
         Nbin = P_bin.size(-1)
 
-        # threshold T = gamma * N_t * scale
         Nt = N_t.view(B, 1).to(device=device, dtype=P_bin.dtype).clamp_min(self.eps)
         scale = self._get_scale(P_bin).to(P_bin.dtype)
         T = (self.gamma_thr * Nt * scale).clamp_min(self.eps)
 
-        # base gate from thresholding power
         logP = torch.log(P_bin + self.eps)
         logT = torch.log(T + self.eps)
         x = (logP - logT) / max(self.tau, self.eps)
         if self.logit_clamp is not None:
             x = x.clamp(-self.logit_clamp, self.logit_clamp)
-        gate_bin = torch.sigmoid(x)  # (B,Nbin)
+        gate_bin = torch.sigmoid(x)  
         gate_bin = self.gate_floor + (1.0 - self.gate_floor) * gate_bin
 
-        # [MOD-1] missing reliability
         if self.use_missing_reliability:
-            R = self._missing_reliability(cond_mask).to(dtype=gate_bin.dtype, device=device)  # (B,Nbin)
+            R = self._missing_reliability(cond_mask, signal_proxy).to(dtype=gate_bin.dtype, device=device)  # (B,Nbin)
         else:
             R = torch.ones_like(gate_bin)
 
-        # [MOD-2] stage schedule
         S = self._schedule_weight(diffusion_step, Nbin, device=device, dtype=gate_bin.dtype)  # (B,Nbin)
 
         gate_bin = gate_bin * R * S
         gate_bin = gate_bin.clamp(0.0, 1.0)
 
-        # map bins -> dim
         gate = self._interp_1d(gate_bin, self.dim)  # (B,dim)
 
         if self.detach_gate:
@@ -341,7 +308,6 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         if self.normalize_gate:
             gate = gate / (gate.mean(dim=-1, keepdim=True) + self.eps)
 
-        # sinusoidal basis
         fb = self.freq_bands_dim.to(device=device, dtype=gate.dtype)  # (dim,)
         t = diffusion_step.to(dtype=gate.dtype).unsqueeze(-1)         # (B,1)
         phase = t * fb.unsqueeze(0)                                   # (B,dim)
@@ -353,10 +319,6 @@ class FreqThresholdSelectiveDiffusionEmbedding(nn.Module):
         y = F.silu(y)
         return y
 
-
-# ==========================
-# Residual Block (same as yours)
-# ==========================
 class ResidualBlock(nn.Module):
     def __init__(self, side_dim, channels, diffusion_embedding_dim, nheads, is_linear=False):
         super().__init__()
@@ -425,9 +387,6 @@ class ResidualBlock(nn.Module):
         return (x + residual) / math.sqrt(2.0), skip
 
 
-# ==========================
-# diff_CD2 (patched signature for forward_freq)
-# ==========================
 class diff_CD2(nn.Module):
     def __init__(self, config, inputdim=2):
         super().__init__()
@@ -452,7 +411,6 @@ class diff_CD2(nn.Module):
             d_model=config["freq_diffusion_embedding_dim"],
             projection_dim=config["freq_diffusion_embedding_dim"],
             t2f=config["trans"],
-            # 你可在 config 里加这些超参，然后从 config 读进来
             kappa_miss=float(config.get("kappa_miss", 0.5)),
             use_missing_reliability=bool(config.get("use_missing_reliability", True)),
             use_stage_schedule=bool(config.get("use_stage_schedule", True)),
@@ -522,9 +480,6 @@ class diff_CD2(nn.Module):
         return x
 
     def forward_freq(self, x, cond_info_f, diffusion_step, N_t, signal_proxy, cond_mask):
-        """
-        [MOD-4] add cond_mask for missing-aware reliability
-        """
         B, inputdim, K, L = x.shape
         x = x.reshape(B * inputdim, K, L)
         x = self.t2f(x)
@@ -534,7 +489,6 @@ class diff_CD2(nn.Module):
         x = F.relu(x)
         x = x.reshape(B, self.channels, K, L)
 
-        # freq diffusion embedding (patched)
         freq_diffusion_emb = self.freq_diffusion_embedding(
             diffusion_step=diffusion_step,
             N_t=N_t,

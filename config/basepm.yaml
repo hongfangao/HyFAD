@@ -18,11 +18,11 @@ diffusion:
   time_diffusion_embedding_dim: 128
   freq_diffusion_embedding_dim: 128
   beta_start: 0.0001
-  beta_end: 0.5
+  beta_end: 0.75
   beta_start_f: 0.0001
   beta_end_f: 0.05
-  lambda_mix: 0.25
-  aux_branch_weight: 0.4
+  lambda_mix: 0.75
+  aux_branch_weight: 1.0
   num_steps: 50
   schedule: "quad"
   is_linear_time: False
@@ -33,4 +33,4 @@ model:
   is_unconditional: 0
   timeemb: 128
   featureemb: 16
-  target_strategy: "random"  
+  target_strategy: "mix"  

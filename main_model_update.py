@@ -19,7 +19,6 @@ class CD2_base(nn.Module):
         self.emb_feature_dim = config["model"]["featureemb"]
         self.is_unconditional = config["model"]["is_unconditional"]
         self.target_strategy = config["model"]["target_strategy"]
-        self.missing_ratio = config["model"]["missing_k"]
 
         trans = config["diffusion"]["trans"]
         assert trans in ["dft", "dct", "dwt"]
@@ -273,8 +272,8 @@ class CD2_base(nn.Module):
         # -------- time-step update produce x_time --------
         c_t = (self.beta_torch[t] / torch.sqrt((1.0 - self.alpha_bar_torch[t]))).view(B, 1, 1)
         inv_sqrt_alpha_t = (1.0 / torch.sqrt(self.alpha_hat_torch[t])).view(B, 1, 1)
-        x_t_time = (noisy_x - c_t * pred_t.detach()) * inv_sqrt_alpha_t
-
+        # x_t_time = (noisy_x - c_t * pred_t.detach()) * inv_sqrt_alpha_t
+        x_t_time = (noisy_x - c_t * pred_t) * inv_sqrt_alpha_t
         # -------- freq noise prediction --------
         inp_f = self.set_input_to_diffmodel_f(x_t_time, observed_data, cond_mask)
         N_t = sigma2.view(B).to(observed_data.dtype)
@@ -296,6 +295,7 @@ class CD2_base(nn.Module):
         loss_consistency = (((true_tot - recon_tot) * target_mask) ** 2).sum() / denom
 
         loss = loss_time + loss_freq + self.aux_branch_weight * loss_consistency
+        # loss = loss_consistency
         return loss
 
     @torch.no_grad()
@@ -581,4 +581,31 @@ class CD2_Physio(CD2_base):
 
         cut_length = torch.zeros(len(observed_data), device=self.device).long()
         for_pattern_mask = observed_mask
+        return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)
+
+class CD2_sine(CD2_base):
+    def __init__(self, config, device, target_dim=5):
+        super(CD2_sine, self).__init__(target_dim, config, device)
+
+    def process_data(self, batch):
+        """
+        处理从数据加载器中传入的数据。保持数据原始形状（B, L, K），不进行不必要的维度变换。
+        """
+        
+        observed_data = batch["observed_data"].to(self.device).float()
+        observed_mask = batch["observed_mask"].to(self.device).float()
+        observed_tp = batch["timepoints"].to(self.device).float()
+        gt_mask = batch["gt_mask"].to(self.device).float()
+        X_true = batch["X_true"].to(self.device).float()
+        # 这里不需要进行 permute 操作，数据已经是 (B, L, K) 形状，直接使用即可
+        # observed_data, observed_mask, gt_mask, X_true 是 (B, L, K) 形状
+        observed_data = observed_data.permute(0, 2, 1)
+        observed_mask = observed_mask.permute(0, 2, 1)
+        gt_mask = gt_mask.permute(0, 2, 1)
+        # cut_length 这里暂时没有在数据中明确使用，保持为零
+        cut_length = torch.zeros(len(observed_data), device=self.device).long()
+
+        # 使用 observed_mask 作为历史掩码
+        for_pattern_mask = observed_mask
+
         return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)

@@ -4,3 +4,10 @@
 *.log
 /.history
 environment.yml
+*.sh
+diff_models_abl.py
+evaluate_pm.py
+evaluate.py
+evaluate_smse.py
+main_model_abl.py
+train_abl.py

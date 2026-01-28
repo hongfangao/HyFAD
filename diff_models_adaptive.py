@@ -420,7 +420,10 @@ class diff_CD2(nn.Module):
             cutoff_power=float(config.get("cutoff_power", 1.0)),
             schedule_mode=str(config.get("schedule_mode", "low2high")),
         )
-
+        # self.freq_diffusion_embedding = DiffusionEmbedding(
+        #     num_steps = config["num_steps"],
+        #     embedding_dim = config["freq_diffusion_embedding_dim"]
+        # )
         self.input_projection = Conv1d_with_init(inputdim, self.channels, 1)
         self.output_projection1 = Conv1d_with_init(self.channels, self.channels, 1)
         self.output_projection2 = Conv1d_with_init(self.channels, 1, 1)
@@ -495,6 +498,9 @@ class diff_CD2(nn.Module):
             signal_proxy=signal_proxy,
             cond_mask=cond_mask,
         )
+        # freq_diffusion_emb = self.diffusion_embedding(
+        #     diffusion_step
+        # )
 
         skip = []
         for layer in self.residual_layers_f:

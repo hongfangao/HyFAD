@@ -1,4 +1,4 @@
-## Code for the paper "TFD: Spectrally Guided Time–Frequency Diffusion Model For Time Series Imputation"
+## Code for the paper "HyFAD: Hybrid Time-Frequency Diffusion with Frequency-Aware Embedding for Time Series Imputation"
 
 
 ### Requirements
@@ -16,13 +16,13 @@ Please refer to [CSDI](https://github.com/ermongroup/CSDI/tree/main) for the dat
 Physionet Dataset
 
 ```bash
-python train_physio_cascade_beta2new.py --testmissingratio [missing ratio] --nsample [number of samples]
+python train_physio.py --testmissingratio [missing ratio] --nsample [number of samples]
 ```
 
 Air Quality Dataset
 
 ```bash
-python train_pm25_cascade_beta2new.py --testmissingratio [missing ratio] --nsample [number of samples]
+python train_pm25.py --testmissingratio [missing ratio] --nsample [number of samples]
 ```
 
 ### Parameters

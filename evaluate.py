@@ -1,5 +1,5 @@
 import logging
-from utils import train, evaluate
+# from utils import train, evaluate
 from dataset_physio import get_dataloader
 from main_model_update import CD2_Physio
 import argparse
@@ -8,27 +8,28 @@ import datetime
 import json
 import yaml
 import os
-
+# from evaluate_smse import evaluate
+from utils import evaluate
 # os.environ["CUDA_VISIBLE_DEVICES"] = '3'
 
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 logging.basicConfig(
     level=logging.INFO,
-    filename='evaluating_'+current_time+'.log',
+    filename='evaluating_smse_'+current_time+'.log',
     filemode='w',
 )
 
 parser = argparse.ArgumentParser(description="cd2")
 parser.add_argument("--config", type=str, default="base.yaml")
-parser.add_argument('--device', default='cuda:5', help='Device for Attack')
+parser.add_argument('--device', default='cuda:2', help='Device for Attack')
 parser.add_argument("--seed", type=int, default=1)
-parser.add_argument("--testmissingratio", type=float, default=0.5)
+parser.add_argument("--testmissingratio", type=float, default=0.1)
 parser.add_argument(
     "--nfold", type=int, default=0, help="for 5fold test (valid value:[0-4])"
 )
 parser.add_argument("--unconditional", action="store_true")
-parser.add_argument("--modelfolder", type=str, default="physio_fold0_20260104_124153")
-parser.add_argument("--nsample", type=int, default=100)
+parser.add_argument("--modelfolder", type=str, default="physio_fold0_20260122_160648")
+parser.add_argument("--nsample", type=int, default=10)
 
 args = parser.parse_args()
 logging.info(args)
@@ -68,7 +69,7 @@ if args.modelfolder == "":
     )
 else:
     model.load_state_dict(torch.load(
-        "./save/" + args.modelfolder + "/model_199.pth"))
+        "./save/" + args.modelfolder + "/model_399.pth"))
 
 evaluate(model, test_loader, nsample=args.nsample,
          scaler=1, foldername=foldername)

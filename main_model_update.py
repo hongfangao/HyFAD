@@ -582,30 +582,3 @@ class CD2_Physio(CD2_base):
         cut_length = torch.zeros(len(observed_data), device=self.device).long()
         for_pattern_mask = observed_mask
         return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)
-
-class CD2_sine(CD2_base):
-    def __init__(self, config, device, target_dim=5):
-        super(CD2_sine, self).__init__(target_dim, config, device)
-
-    def process_data(self, batch):
-        """
-        处理从数据加载器中传入的数据。保持数据原始形状（B, L, K），不进行不必要的维度变换。
-        """
-        
-        observed_data = batch["observed_data"].to(self.device).float()
-        observed_mask = batch["observed_mask"].to(self.device).float()
-        observed_tp = batch["timepoints"].to(self.device).float()
-        gt_mask = batch["gt_mask"].to(self.device).float()
-        X_true = batch["X_true"].to(self.device).float()
-        # 这里不需要进行 permute 操作，数据已经是 (B, L, K) 形状，直接使用即可
-        # observed_data, observed_mask, gt_mask, X_true 是 (B, L, K) 形状
-        observed_data = observed_data.permute(0, 2, 1)
-        observed_mask = observed_mask.permute(0, 2, 1)
-        gt_mask = gt_mask.permute(0, 2, 1)
-        # cut_length 这里暂时没有在数据中明确使用，保持为零
-        cut_length = torch.zeros(len(observed_data), device=self.device).long()
-
-        # 使用 observed_mask 作为历史掩码
-        for_pattern_mask = observed_mask
-
-        return (observed_data, observed_mask, observed_tp, gt_mask, for_pattern_mask, cut_length)
